@@ -75,54 +75,89 @@ bool check(const unsigned char* array1, const unsigned char* array2, int length)
         0x37, 0x38, 0x39, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
     };
 
+typedef __uint128_t uint128_t;
+
 void decode(const unsigned char* input, unsigned char* output) {
-    alignas(64) unsigned char digits[52] = {0}; // Temporary storage for decoded digits
-    int digitslen = 1; // Length of the decoded digits
-    int zeros = 0; // Count of leading zeros
-
-    // Validate input length
+    alignas(64) uint64_t digits[52] = {0};
+    int digitslen = 1;
     const int length = strlen((const char*)input);
-    if (length == 0 || length > 52) {
-        memset(output, 0, 38); // Clear output buffer for invalid input
-        return;
+
+    // Unroll the first loop iteration to avoid zero multiplication
+    if (length > 0) {
+        uint64_t current_char = BASE58_MAP[input[0]];
+        digits[0] = current_char;
     }
 
-    // Validate input characters and count leading zeros
-    bool isValid = true;
-    for (int i = 0; i < length; ++i) {
-        if (BASE58_MAP[input[i]] == 0xFF) {
-            isValid = false;
-            break;
+    for (int i = 1; i < length; ++i) {
+        uint64_t current_char = BASE58_MAP[input[i]];
+        uint128_t carry = current_char;
+
+        // Process digits with 128-bit arithmetic
+        int j = 0;
+        for (; j + 3 < digitslen; j += 4) {
+            // Small loop unrolling (4 iterations)
+            uint128_t product0 = ((uint128_t)digits[j] * 58) + carry;
+            digits[j] = (uint64_t)(product0 & 0xFFFFFFFFFFFFFFFF);
+            carry = product0 >> 64;
+
+            uint128_t product1 = ((uint128_t)digits[j+1] * 58) + carry;
+            digits[j+1] = (uint64_t)(product1 & 0xFFFFFFFFFFFFFFFF);
+            carry = product1 >> 64;
+
+            uint128_t product2 = ((uint128_t)digits[j+2] * 58) + carry;
+            digits[j+2] = (uint64_t)(product2 & 0xFFFFFFFFFFFFFFFF);
+            carry = product2 >> 64;
+
+            uint128_t product3 = ((uint128_t)digits[j+3] * 58) + carry;
+            digits[j+3] = (uint64_t)(product3 & 0xFFFFFFFFFFFFFFFF);
+            carry = product3 >> 64;
         }
-        if (input[i] == BASE58[0]) {
-            zeros++;
+
+        // Process remaining digits
+        for (; j < digitslen; j++) {
+            uint128_t product = ((uint128_t)digits[j] * 58) + carry;
+            digits[j] = (uint64_t)(product & 0xFFFFFFFFFFFFFFFF);
+            carry = product >> 64;
+        }
+
+        // Store remaining carry
+        while (carry > 0 && digitslen < 52) {
+            digits[digitslen++] = (uint64_t)(carry & 0xFFFFFFFFFFFFFFFF);
+            carry >>= 64;
+        }
+    }
+
+    // Convert to big-endian byte array
+    int out_pos = 0;
+    bool leading_zero = true;
+
+    for (int i = digitslen - 1; i >= 0; i--) {
+        uint64_t digit = digits[i];
+
+        // Use __builtin_bswap64 to reverse the byte order of the 64-bit integer
+        uint64_t swapped_digit = __builtin_bswap64(digit);
+
+        // Process each byte of the swapped 64-bit digit
+        uint8_t* bytes = (uint8_t*)&swapped_digit;
+
+        // Skip leading zeros only once
+        if (leading_zero) {
+            int k = 0;
+            while (k < 8 && bytes[k] == 0) k++;
+            if (k < 8) {
+                leading_zero = false;
+                memcpy(output + out_pos, bytes + k, 8 - k);
+                out_pos += 8 - k;
+            }
         } else {
-            break; // Stop counting zeros after the first non-zero character
-        }
-    }
-    if (!isValid) {
-        memset(output, 0, 38); // Clear output buffer for invalid input
-        return;
-    }
-
-    // Perform carry propagation
-    for (int i = 0; i < length; ++i) {
-        uint32_t carry = BASE58_MAP[input[i]];
-        for (int j = 0; j < digitslen; ++j) {
-            carry += (uint32_t)(digits[j]) * 58;
-            digits[j] = carry & 0xFF;
-            carry >>= 8;
-        }
-        while (carry > 0) {
-            digits[digitslen++] = carry & 0xFF;
-            carry >>= 8;
+            memcpy(output + out_pos, bytes, 8);
+            out_pos += 8;
         }
     }
 
-    // Write output
-    memset(output, 0, 38); // Clear output buffer
-    for (int i = 0; i < digitslen; ++i) {
-        output[zeros + i] = digits[digitslen - 1 - i];
+    // Pad with zeros if necessary
+    if (out_pos < 38) {
+        memset(output + out_pos, 0, 38 - out_pos);
     }
 }
 
